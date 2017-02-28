@@ -247,19 +247,19 @@ func (p *workflowExecutionPersistenceClient) GetWorkflowMutableState(request *Ge
 	return resonse, err
 }
 
-func (p *taskPersistenceClient) CreateTask(request *CreateTaskRequest) (*CreateTaskResponse, error) {
-	p.m3Client.IncCounter(metrics.CreateTaskScope, metrics.WorkflowRequests)
+func (p *taskPersistenceClient) CreateTasks(request *CreateTasksRequest) (*CreateTasksResponse, error) {
+	p.m3Client.IncCounter(metrics.CreateTasksScope, metrics.WorkflowRequests)
 
-	sw := p.m3Client.StartTimer(metrics.CreateTaskScope, metrics.WorkflowLatency)
-	response, err := p.persistence.CreateTask(request)
+	sw := p.m3Client.StartTimer(metrics.CreateTasksScope, metrics.WorkflowLatency)
+	response, err := p.persistence.CreateTasks(request)
 	sw.Stop()
 
 	if err != nil {
 		switch err.(type) {
 		case *ConditionFailedError:
-			p.m3Client.IncCounter(metrics.CreateTaskScope, metrics.PersistenceErrConditionFailedCounter)
+			p.m3Client.IncCounter(metrics.CreateTasksScope, metrics.PersistenceErrConditionFailedCounter)
 		default:
-			p.m3Client.IncCounter(metrics.CreateTaskScope, metrics.WorkflowFailures)
+			p.m3Client.IncCounter(metrics.CreateTasksScope, metrics.WorkflowFailures)
 		}
 	}
 

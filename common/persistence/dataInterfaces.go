@@ -276,16 +276,22 @@ type (
 	UpdateTaskListResponse struct {
 	}
 
-	// CreateTaskRequest is used to create a new task for a workflow exectution
 	CreateTaskRequest struct {
 		Execution workflow.WorkflowExecution
 		Data      Task
 		TaskID    int64
-		RangeID   int64
+	}
+
+	// CreateTaskRequest is used to create a new task for a workflow exectution
+	CreateTasksRequest struct {
+		Tasks   []*CreateTaskRequest
+		TaskList     string
+		TaskType     int
+		RangeID int64
 	}
 
 	// CreateTaskResponse is the response to CreateTaskRequest
-	CreateTaskResponse struct {
+	CreateTasksResponse struct {
 	}
 
 	// GetTasksRequest is used to retrieve tasks of a task list
@@ -366,7 +372,7 @@ type (
 	TaskManager interface {
 		LeaseTaskList(request *LeaseTaskListRequest) (*LeaseTaskListResponse, error)
 		UpdateTaskList(request *UpdateTaskListRequest) (*UpdateTaskListResponse, error)
-		CreateTask(request *CreateTaskRequest) (*CreateTaskResponse, error)
+		CreateTasks(requests *CreateTasksRequest) (*CreateTasksResponse, error)
 		GetTasks(request *GetTasksRequest) (*GetTasksResponse, error)
 		CompleteTask(request *CompleteTaskRequest) error
 	}

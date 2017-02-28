@@ -11,11 +11,11 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/uber-common/bark"
 
+	"github.com/uber-go/tally"
 	workflow "github.com/uber/cadence/.gen/go/shared"
 	"github.com/uber/cadence/common"
 	"github.com/uber/cadence/common/logging"
 	"github.com/uber/cadence/common/metrics"
-	"github.com/uber-go/tally"
 )
 
 const (
@@ -394,15 +394,21 @@ func (s *TestBase) CreateDecisionTask(workflowExecution workflow.WorkflowExecuti
 	}
 
 	taskID := s.GetNextSequenceNumber()
-	_, err = s.TaskMgr.CreateTask(&CreateTaskRequest{
-		TaskID:    taskID,
-		Execution: workflowExecution,
-		Data: &DecisionTask{
-			TaskID:     taskID,
-			TaskList:   taskList,
-			ScheduleID: decisionScheduleID,
+	_, err = s.TaskMgr.CreateTasks(&CreateTasksRequest{
+		Tasks: []*CreateTaskRequest{
+			{
+				TaskID:    taskID,
+				Execution: workflowExecution,
+				Data: &DecisionTask{
+					TaskID:     taskID,
+					TaskList:   taskList,
+					ScheduleID: decisionScheduleID,
+				},
+			},
 		},
-		RangeID: leaseResponse.TaskListInfo.RangeID,
+		RangeID:  leaseResponse.TaskListInfo.RangeID,
+		TaskType: TaskListTypeDecision,
+		TaskList: taskList,
 	})
 
 	if err != nil {
@@ -417,18 +423,24 @@ func (s *TestBase) CreateActivityTasks(workflowExecution workflow.WorkflowExecut
 	[]int64, error) {
 
 	var taskIDs []int64
-	var leaseResponse *LeaseTaskListResponse
 	var err error
+	taskBatches := make(map[string]*CreateTasksRequest)
 	for activityScheduleID, taskList := range activities {
-
-		leaseResponse, err = s.TaskMgr.LeaseTaskList(
-			&LeaseTaskListRequest{TaskList: taskList, TaskType: TaskListTypeActivity})
+		var request *CreateTasksRequest
+		var ok bool
+		if request, ok = taskBatches[taskList]; !ok {
+			request = &CreateTasksRequest{
+				TaskType: TaskListTypeActivity,
+				TaskList: taskList,
+			}
+			taskBatches[taskList] = request
+		}
 		if err != nil {
 			return []int64{}, err
 		}
 		taskID := s.GetNextSequenceNumber()
 
-		_, err := s.TaskMgr.CreateTask(&CreateTaskRequest{
+		request.Tasks = append(request.Tasks, &CreateTaskRequest{
 			TaskID:    taskID,
 			Execution: workflowExecution,
 			Data: &ActivityTask{
@@ -436,16 +448,22 @@ func (s *TestBase) CreateActivityTasks(workflowExecution workflow.WorkflowExecut
 				TaskList:   taskList,
 				ScheduleID: activityScheduleID,
 			},
-			RangeID: leaseResponse.TaskListInfo.RangeID,
 		})
-
-		if err != nil {
-			return nil, err
-		}
 
 		taskIDs = append(taskIDs, taskID)
 	}
-
+	for taskList, t := range taskBatches {
+		leaseResponse, err := s.TaskMgr.LeaseTaskList(
+			&LeaseTaskListRequest{TaskList: taskList, TaskType: TaskListTypeActivity})
+		if err != nil {
+			return []int64{}, err
+		}
+		t.RangeID = leaseResponse.TaskListInfo.RangeID
+		_, err2 := s.TaskMgr.CreateTasks(t)
+		if err2 != nil {
+			return nil, err
+		}
+	}
 	return taskIDs, nil
 }
 

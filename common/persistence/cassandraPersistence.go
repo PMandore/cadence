@@ -30,7 +30,7 @@ const (
 
 const (
 	// Row types for table executions
-	rowTypeShard        = iota
+	rowTypeShard = iota
 	rowTypeExecution
 	rowTypeTransferTask
 	rowTypeTimerTask
@@ -38,7 +38,7 @@ const (
 
 const (
 	// Row types for table tasks
-	rowTypeTask     = iota
+	rowTypeTask = iota
 	rowTypeTaskList
 )
 
@@ -876,54 +876,54 @@ func (d *cassandraPersistence) UpdateTaskList(request *UpdateTaskListRequest) (*
 }
 
 // From TaskManager interface
-func (d *cassandraPersistence) CreateTask(request *CreateTaskRequest) (*CreateTaskResponse, error) {
-	var taskList string
-	var scheduleID int64
-	taskType := request.Data.GetType()
-	switch taskType {
-	case TaskListTypeActivity:
-		taskList = request.Data.(*ActivityTask).TaskList
-		scheduleID = request.Data.(*ActivityTask).ScheduleID
-
-	case TaskListTypeDecision:
-		taskList = request.Data.(*DecisionTask).TaskList
-		scheduleID = request.Data.(*DecisionTask).ScheduleID
-	}
-
-	// Batch is used to include conditional update on range_id
+func (d *cassandraPersistence) CreateTasks(request *CreateTasksRequest) (*CreateTasksResponse, error) {
 	batch := d.session.NewBatch(gocql.LoggedBatch)
+	for _, task := range request.Tasks {
+		var scheduleID int64
+		if task.Data.GetType() != request.TaskType {
+			return nil,  &workflow.InternalServiceError{
+				Message: fmt.Sprint("CreateTasks operation failed. Inconsistent taskType"),
+			}
+		}
+		switch request.TaskType {
+		case TaskListTypeActivity:
+			scheduleID = task.Data.(*ActivityTask).ScheduleID
 
-	batch.Query(templateCreateTaskQuery,
-		taskList,
-		request.Data.GetType(),
-		rowTypeTask,
-		request.TaskID,
-		request.Execution.GetWorkflowId(),
-		request.Execution.GetRunId(),
-		scheduleID)
+		case TaskListTypeDecision:
+			scheduleID = task.Data.(*DecisionTask).ScheduleID
+		}
 
+		batch.Query(templateCreateTaskQuery,
+			request.TaskList,
+			request.TaskType,
+			rowTypeTask,
+			task.TaskID,
+			task.Execution.GetWorkflowId(),
+			task.Execution.GetRunId(),
+			scheduleID)
+	}
 	// The following query is used to ensure that range_id didn't change
 	batch.Query(templateUpdateTaskListRangeOnlyQuery,
 		request.RangeID,
-		taskList,
-		taskType,
+		request.TaskList,
+		request.TaskType,
 		request.RangeID,
 	)
 	previous := make(map[string]interface{})
 	applied, _, err := d.session.MapExecuteBatchCAS(batch, previous)
 	if err != nil {
 		return nil, &workflow.InternalServiceError{
-			Message: fmt.Sprintf("CreateTask operation failed. Error : %v", err),
+			Message: fmt.Sprintf("CreateTasks operation failed. Error : %v", err),
 		}
 	}
 	if !applied {
 		rangeID := previous["range_id"]
 		return nil, &ConditionFailedError{
-			Msg: fmt.Sprintf("Failed to create task. TaskList: %v, taskType: %v, rangeID: %v, db rangeID: %v",
-				taskList, taskType, request.RangeID, rangeID),
+			Msg: fmt.Sprintf("Failed to create tasks. TaskList: %v, taskType: %v, rangeID: %v, db rangeID: %v",
+				request.TaskList, request.TaskType, request.RangeID, rangeID),
 		}
 	}
-	return &CreateTaskResponse{}, nil
+	return &CreateTasksResponse{}, nil
 }
 
 // From TaskManager interface
