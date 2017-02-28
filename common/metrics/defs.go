@@ -33,7 +33,7 @@ const (
 
 // Service names for all services that emit metrics.
 const (
-	Common      = iota
+	Common = iota
 	Frontend
 	History
 	Matching
@@ -111,7 +111,7 @@ const (
 	// GetWorkflowMutableStateScope tracks GetWorkflowMutableState calls made by service to persistence layer
 	GetWorkflowMutableStateScope
 	// CreateTaskScope tracks CreateTask calls made by service to persistence layer
-	CreateTaskScope
+	CreateTasksScope
 	// GetTasksScope tracks GetTasks calls made by service to persistence layer
 	GetTasksScope
 	// CompleteTaskScope tracks CompleteTask calls made by service to persistence layer
@@ -225,7 +225,7 @@ var ScopeDefs = map[ServiceIdx]map[int]scopeDefinition{
 		CompleteTransferTaskScope:    {operation: "CompleteTransferTask"},
 		GetTimerIndexTasksScope:      {operation: "GetTimerIndexTasks"},
 		GetWorkflowMutableStateScope: {operation: "GetWorkflowMutableState"},
-		CreateTaskScope:              {operation: "CreateTask"},
+		CreateTasksScope:             {operation: "CreateTasks"},
 		GetTasksScope:                {operation: "GetTasks"},
 		CompleteTaskScope:            {operation: "CompleteTask"},
 		LeaseTaskListScope:           {operation: "LeaseTaskList"},
@@ -278,7 +278,7 @@ var ScopeDefs = map[ServiceIdx]map[int]scopeDefinition{
 
 // Common Metrics enum
 const (
-	WorkflowRequests                         = iota
+	WorkflowRequests = iota
 	WorkflowFailures
 	WorkflowLatency
 	CadenceErrEntityNotExistsCounter
