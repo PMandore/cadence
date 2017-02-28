@@ -25,7 +25,8 @@ const (
 	defaultRangeSize  = 100000
 	getTasksBatchSize = 100
 	// To perform one db operation if there are no pollers
-	taskBufferSize = getTasksBatchSize - 1
+	taskBufferSize   = getTasksBatchSize - 1
+	addTaskBatchSize = 100
 
 	done time.Duration = -1
 )
@@ -68,16 +69,17 @@ type ackManager struct {
 
 // Single task list in memory state
 type taskListContext struct {
-	taskListID *taskListID
-	logger     bark.Logger
-	engine     *matchingEngineImpl
-	taskBuffer chan *persistence.TaskInfo // tasks loaded from persistence
+	taskListID   *taskListID
+	logger       bark.Logger
+	engine       *matchingEngineImpl
+	addTaskCh    chan *taskReplyChPair      // buffer used to batch up add requests
+	taskBufferCh chan *persistence.TaskInfo // tasks loaded from persistence
 	// Sync channel used to perform sync matching.
 	// It must to be unbuffered. addTask publishes to it asynchronously and expects publish to succeed
 	// only if there is waiting poll that consumes from it.
-	syncMatch  chan *getTaskResult
-	shutdownCh chan struct{} // Delivers stop to the pump that populates taskBuffer
-	stopped    int32
+	syncMatchCh chan *getTaskResult
+	shutdownCh  chan struct{} // Delivers stop to the pump that populates taskBufferCh
+	stopped     int32
 
 	sync.Mutex
 	taskAckManager          ackManager // tracks ackLevel for delivered messages
@@ -96,7 +98,7 @@ type getTaskResult struct {
 
 // syncMatchResponse result of sync match delivered to a createTask caller
 type syncMatchResponse struct {
-	response *persistence.CreateTaskResponse
+	response *persistence.CreateTasksResponse
 	err      error
 }
 
@@ -200,13 +202,14 @@ func (e *matchingEngineImpl) getTaskListContextImpl(taskList *taskListID) (*task
 	e.taskListsLock.RUnlock()
 	ctx := &taskListContext{
 		engine:             e,
-		taskBuffer:         make(chan *persistence.TaskInfo, taskBufferSize),
+		addTaskCh:          make(chan *taskReplyChPair, addTaskBatchSize),
+		taskBufferCh:       make(chan *persistence.TaskInfo, taskBufferSize),
 		shutdownCh:         make(chan struct{}),
 		taskListID:         taskList,
 		logger:             e.logger,
 		taskAckManager:     newAckManager(e.logger),
 		writeOffsetManager: newAckManager(e.logger),
-		syncMatch:          make(chan *getTaskResult),
+		syncMatchCh:        make(chan *getTaskResult),
 	}
 	e.taskListsLock.Lock()
 	if result, ok := e.taskLists[*taskList]; ok {
@@ -261,7 +264,7 @@ func (e *matchingEngineImpl) AddDecisionTask(addRequest *m.AddDecisionTaskReques
 			ScheduleID: addRequest.GetScheduleId(),
 			TaskID:     taskID,
 		}
-		r, err = e.taskManager.CreateTask(&persistence.CreateTaskRequest{
+		err = tlCtx.persistTask(&persistence.CreateTaskRequest{
 			Execution: *addRequest.GetExecution(),
 			Data:      task,
 			TaskID:    task.TaskID,
@@ -537,10 +540,26 @@ func (c *taskListContext) persistAckLevel() error {
 }
 
 // Starts reading pump for the given task list.
-// The pump fills up taskBuffer from persistence.
+// The pump fills up taskBufferCh from persistence.
 func (c *taskListContext) Start() {
+	c.startAddPump()
+	c.startPollPump()
+}
+
+func (c *taskListContext) startAddPump() {
 	go func() {
-		defer close(c.taskBuffer)
+		defer close(c.addTaskCh)
+		for {
+			var batch []*persistence.CreateTaskRequest
+			p := <-c.addTaskCh
+			batch = append(batch, p.task)
+		}
+	}()
+}
+
+func (c *taskListContext) startPollPump() {
+	go func() {
+		defer close(c.taskBufferCh)
 		retrier := backoff.NewRetrier(emptyGetTasksRetryPolicy, backoff.SystemClock)
 	getTasksPumpLoop:
 		for {
@@ -590,16 +609,17 @@ func (c *taskListContext) Start() {
 
 			for _, t := range tasks {
 				select {
-				case c.taskBuffer <- t:
+				case c.taskBufferCh <- t:
 				case <-c.shutdownCh:
 					break getTasksPumpLoop
 				}
 			}
 		}
 	}()
+
 }
 
-// Stops pump that fills up taskBuffer from persistence.
+// Stops pump that fills up taskBufferCh from persistence.
 func (c *taskListContext) Stop() {
 	if !atomic.CompareAndSwapInt32(&c.stopped, 0, 1) {
 		return
@@ -607,6 +627,19 @@ func (c *taskListContext) Stop() {
 	c.logger.Infof("Unloaded %v", c.taskListID)
 	close(c.shutdownCh)
 	c.engine.removeTaskListContext(c.taskListID)
+}
+
+type taskReplyChPair struct {
+	task    *persistence.CreateTaskRequest
+	replyCh chan (error)
+}
+
+func (c *taskListContext) persistTask(task *persistence.CreateTaskRequest) (error) {
+	var replyCh chan (error)
+	c.addTaskCh <- &taskReplyChPair{task: task, replyCh: replyCh}
+	err := <-replyCh
+	return err
+	//return c.engine.taskManager.CreateTask(task)
 }
 
 // initiateTaskAppend returns taskID to use to persist the task
@@ -666,17 +699,17 @@ func (c *taskListContext) getTaskContext() (*taskContext, error) {
 	return tCtx, nil
 }
 
-// Loads task from taskBuffer (which is populated from persistence) or from sync match to add task call
+// Loads task from taskBufferCh (which is populated from persistence) or from sync match to add task call
 func (c *taskListContext) getTask() (*getTaskResult, error) {
 	timer := time.NewTimer(c.engine.longPollExpirationInterval)
 	defer timer.Stop()
 	select {
-	case task, ok := <-c.taskBuffer:
+	case task, ok := <-c.taskBufferCh:
 		if !ok { // Task list getTasks pump is shutdown
 			return nil, errPumpClosed
 		}
 		return &getTaskResult{task: task}, nil
-	case resultFromSyncMatch := <-c.syncMatch:
+	case resultFromSyncMatch := <-c.syncMatchCh:
 		return resultFromSyncMatch, nil
 	case <-timer.C:
 		return nil, ErrNoTasks
@@ -768,12 +801,12 @@ func (c *taskListContext) String() string {
 // When this method returns non nil response without error it is guaranteed that the task is started
 // and sent to a poller. So it not necessary to persist it.
 // Returns (nil, nil) if there is no waiting poller which indicates that task has to be persisted.
-func (c *taskListContext) trySyncMatch(task *persistence.TaskInfo) (*persistence.CreateTaskResponse, error) {
+func (c *taskListContext) trySyncMatch(task *persistence.TaskInfo) (*persistence.CreateTasksResponse, error) {
 	// Request from the point of view of Add(Activity|Decision)Task operation.
 	// But it is getTask result from the point of view of a poll operation.
 	request := &getTaskResult{task: task, C: make(chan *syncMatchResponse, 1)}
 	select {
-	case c.syncMatch <- request: // poller goroutine picked up the task
+	case c.syncMatchCh <- request: // poller goroutine picked up the task
 		r := <-request.C
 		return r.response, r.err
 	default: // no poller waiting for tasks
@@ -856,7 +889,7 @@ func (c *taskContext) completeTask(err error) {
 	if c.syncResponseCh != nil {
 		// It is OK to succeed task creation as it was already completed
 		c.syncResponseCh <- &syncMatchResponse{
-			response: &persistence.CreateTaskResponse{}, err: err}
+			response: &persistence.CreateTasksResponse{}, err: err}
 		return
 	}
 
